@@ -3,7 +3,7 @@ import bcrypt from "bcryptjs";
 import multer from "multer";
 import csv from "csv-parser";
 import fs from "fs";
-import { query } from "../dbHelper.js"; // ✅ SAME STYLE AS product.js
+import { query } from "./dbHelper.js"; // ✅ SAME STYLE AS product.js
 
 const router = express.Router();
 const upload = multer({ dest: "uploads/" });
