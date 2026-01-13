@@ -6,13 +6,37 @@ const router = express.Router();
 /* ------------------- FETCH ALL PRODUCTS ------------------- */
 router.get("/", async (req, res) => {
   try {
-    const [rows] = await query("SELECT * FROM products");
-    res.json(rows);
+    // 1️⃣ Fetch all products
+    const [products] = await query("SELECT * FROM products");
+
+    // 2️⃣ Fetch active offers
+    const [offers] = await query(
+      `SELECT o.product_id, o.buy_quantity, o.free_quantity
+       FROM offers o
+       WHERE o.active = 1`
+    );
+
+    // 3️⃣ Map offers to products
+    const productsWithOffers = products.map((p) => {
+      const offer = offers.find((o) => o.product_id === p.id);
+      return {
+        ...p,
+        offer: offer
+          ? {
+              buy_quantity: offer.buy_quantity,
+              free_quantity: offer.free_quantity,
+            }
+          : null,
+      };
+    });
+
+    res.json(productsWithOffers);
   } catch (err) {
     console.error("Error fetching products:", err);
     res.status(500).json({ message: "Error fetching products" });
   }
 });
+
 
 /* ------------------- ADD NEW PRODUCT ------------------- */
 router.post("/", async (req, res) => {
