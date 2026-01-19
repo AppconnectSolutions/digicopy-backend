@@ -1,4 +1,3 @@
-// routes/invoice.js
 import express from "express";
 import multer from "multer";
 import path from "path";
@@ -6,12 +5,13 @@ import fs from "fs";
 
 const router = express.Router();
 
+// ✅ ALWAYS use uploads/invoice (same everywhere)
+const INVOICE_DIR = path.join(process.cwd(), "uploads", "invoice");
+
 const storage = multer.diskStorage({
-    
   destination: (req, file, cb) => {
-    const dir = path.join(process.cwd(), "uploads/invoice");
-    fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
+    fs.mkdirSync(INVOICE_DIR, { recursive: true });
+    cb(null, INVOICE_DIR);
   },
   filename: (req, file, cb) => {
     cb(null, `invoice-${Date.now()}.png`);
@@ -21,13 +21,16 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 router.post("/upload", upload.single("file"), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ message: "No file uploaded" });
-  }
+  if (!req.file) return res.status(400).json({ message: "No file uploaded" });
 
+  // ✅ this must match server static route
   const filePath = `/uploads/invoice/${req.file.filename}`;
-  const publicUrl = `${process.env.BASE_URL || "http://localhost:5000"}${filePath}`;
-  res.json({ url: publicUrl });
+
+  // ✅ important: BASE_URL must be like http://localhost:5000 or https://api.digicopy.in
+  const baseUrl = (process.env.BASE_URL || "http://localhost:5000").replace(/\/$/, "");
+  const publicUrl = `${baseUrl}${filePath}`;
+
+  return res.json({ url: publicUrl, filePath });
 });
 
 export default router;

@@ -3,14 +3,13 @@ import bcrypt from "bcryptjs";
 import multer from "multer";
 import csv from "csv-parser";
 import fs from "fs";
-import { query } from "./dbHelper.js"; // ✅ SAME STYLE AS product.js
+import { query } from "./dbHelper.js";
 
 const router = express.Router();
 const upload = multer({ dest: "uploads/" });
 
 // Helper: generate default password
-const generateDefaultPassword = (mobile) =>
-  mobile.toString().slice(-4);
+const generateDefaultPassword = (mobile) => mobile.toString().slice(-4);
 
 /* ------------------- REGISTER ------------------- */
 router.post("/register", async (req, res) => {
@@ -27,9 +26,7 @@ router.post("/register", async (req, res) => {
     );
 
     if (existing.length > 0) {
-      return res
-        .status(400)
-        .json({ message: "Email or mobile already registered" });
+      return res.status(400).json({ message: "Email or mobile already registered" });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -64,17 +61,16 @@ router.post("/upload", upload.single("file"), async (req, res) => {
 
   const customers = [];
 
-  // Parse CSV
   fs.createReadStream(req.file.path)
-    .pipe(csv({ mapHeaders: ({ header }) => header.trim().toLowerCase() })) // normalize headers
+    .pipe(csv({ mapHeaders: ({ header }) => header.trim().toLowerCase() }))
     .on("data", (row) => {
-      if (!row.mobile) return; // skip rows without mobile
+      if (!row.mobile) return;
 
       customers.push({
-         name: row.name ? row.name.trim() : null,
-        email: row.email || null,
+        name: row.name ? row.name.trim() : null,
+        email: row.email ? row.email.trim() : null,
         mobile: row.mobile.toString().trim(),
-        password: generateDefaultPassword(row.mobile), // your existing function
+        password: generateDefaultPassword(row.mobile),
       });
     })
     .on("end", async () => {
@@ -84,32 +80,33 @@ router.post("/upload", upload.single("file"), async (req, res) => {
           return res.status(400).json({ message: "No valid customers in CSV" });
         }
 
-        // Get all existing mobiles in one query
-        const mobiles = customers.map(c => c.mobile);
+        const mobiles = customers.map((c) => c.mobile);
+
         const [existingRows] = await query(
           `SELECT mobile FROM customers WHERE mobile IN (?)`,
           [mobiles]
         );
-        const existingMobiles = new Set(existingRows.map(r => r.mobile));
 
-        // Prepare batch insert
+        const existingMobiles = new Set(existingRows.map((r) => r.mobile));
+
         const rowsToInsert = [];
         for (const c of customers) {
-          if (existingMobiles.has(c.mobile)) continue; // skip duplicates
+          if (existingMobiles.has(c.mobile)) continue;
+
           const hashedPassword = await bcrypt.hash(c.password, 10);
+
           rowsToInsert.push([
             c.name,
             c.email,
             c.mobile,
             hashedPassword,
-            'Silver', // tier default
-            0,        // points_balance default
-            1,        // password_set
-            0         // force_password_change default as per your table
+            "Silver",
+            0,
+            1,
+            0,
           ]);
         }
 
-        // Only insert if there are rows
         if (rowsToInsert.length > 0) {
           await query(
             `INSERT INTO customers
@@ -119,11 +116,8 @@ router.post("/upload", upload.single("file"), async (req, res) => {
           );
         }
 
-        fs.unlink(req.file.path, () => {}); // delete CSV
-        res.json({ 
-          message: `Upload finished. ${rowsToInsert.length} customers added.` 
-        });
-
+        fs.unlink(req.file.path, () => {});
+        res.json({ message: `Upload finished. ${rowsToInsert.length} customers added.` });
       } catch (err) {
         console.error("Upload DB Error:", err);
         fs.unlink(req.file.path, () => {});
@@ -137,17 +131,12 @@ router.post("/upload", upload.single("file"), async (req, res) => {
     });
 });
 
-
-
 /* ------------------- LOGIN ------------------- */
 router.post("/login", async (req, res) => {
   try {
     const { mobile, password } = req.body;
 
-    const [rows] = await query(
-      "SELECT * FROM customers WHERE mobile=?",
-      [mobile]
-    );
+    const [rows] = await query("SELECT * FROM customers WHERE mobile=?", [mobile]);
 
     if (!rows.length) {
       return res.status(400).json({ message: "Invalid credentials" });
@@ -178,9 +167,11 @@ router.post("/login", async (req, res) => {
 });
 
 /* ------------------- GET ALL CUSTOMERS ------------------- */
+/* ✅ FIX: printCount must be only Xerox pages */
 router.get("/", async (req, res) => {
   try {
-    const [rows] = await query(`
+    const [rows] = await query(
+      `
       SELECT
         c.id,
         c.name,
@@ -188,13 +179,20 @@ router.get("/", async (req, res) => {
         c.mobile,
         c.tier,
         c.points_balance,
-        IFNULL(SUM(ti.quantity), 0) AS printCount
+        IFNULL(SUM(
+          CASE
+            WHEN LOWER(TRIM(p.name)) LIKE '%xerox%' THEN ti.quantity
+            ELSE 0
+          END
+        ), 0) AS printCount
       FROM customers c
       LEFT JOIN transactions t ON t.customer_id = c.id
       LEFT JOIN transaction_items ti ON ti.transaction_id = t.id
+      LEFT JOIN products p ON p.id = ti.product_id
       GROUP BY c.id
       ORDER BY c.id DESC
-    `);
+      `
+    );
 
     res.json(rows);
   } catch (err) {
@@ -203,7 +201,6 @@ router.get("/", async (req, res) => {
   }
 });
 
-/* ------------------- ADMIN ADD CUSTOMER ------------------- */
 /* ------------------- ADMIN ADD / UPDATE CUSTOMER ------------------- */
 router.post("/admin-add", async (req, res) => {
   try {
@@ -213,11 +210,7 @@ router.post("/admin-add", async (req, res) => {
       return res.status(400).json({ message: "Mobile number is required" });
     }
 
-    // Check if customer exists
-    const [rows] = await query(
-      "SELECT id, name FROM customers WHERE mobile=?",
-      [mobile]
-    );
+    const [rows] = await query("SELECT id, name FROM customers WHERE mobile=?", [mobile]);
 
     let customer;
     let action = "";
@@ -226,16 +219,13 @@ router.post("/admin-add", async (req, res) => {
       customer = rows[0];
 
       if (!customer.name || customer.name.trim() === "") {
-        // Update existing customer name
         await query("UPDATE customers SET name=? WHERE id=?", [name, customer.id]);
         action = "updated";
-        customer.name = name; // update locally
+        customer.name = name;
       } else {
-        // Already exists with a name, just select
         action = "exists";
       }
     } else {
-      // Create new customer
       const defaultPassword = mobile.slice(-4);
       const hashedPassword = await bcrypt.hash(defaultPassword, 10);
 
@@ -260,7 +250,6 @@ router.post("/admin-add", async (req, res) => {
     res.status(500).json({ message: "Server error", error: err.message });
   }
 });
-
 
 /* ------------------- CHANGE PASSWORD ------------------- */
 router.post("/change-password", async (req, res) => {
