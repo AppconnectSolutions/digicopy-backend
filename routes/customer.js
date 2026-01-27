@@ -173,24 +173,26 @@ router.get("/", async (req, res) => {
     const [rows] = await query(
       `
       SELECT
-        c.id,
-        c.name,
-        c.email,
-        c.mobile,
-        c.tier,
-        c.points_balance,
-        IFNULL(SUM(
-          CASE
-            WHEN LOWER(TRIM(p.name)) LIKE '%xerox%' THEN ti.quantity
-            ELSE 0
-          END
-        ), 0) AS printCount
-      FROM customers c
-      LEFT JOIN transactions t ON t.customer_id = c.id
-      LEFT JOIN transaction_items ti ON ti.transaction_id = t.id
-      LEFT JOIN products p ON p.id = ti.product_id
-      GROUP BY c.id
-      ORDER BY c.id DESC
+  c.id,
+  c.name,
+  c.email,
+  c.mobile,
+  c.tier,
+  c.points_balance,
+  c.is_active,
+  IFNULL(SUM(
+    CASE
+      WHEN LOWER(TRIM(p.name)) LIKE '%xerox%' THEN ti.quantity
+      ELSE 0
+    END
+  ), 0) AS printCount
+FROM customers c
+LEFT JOIN transactions t ON t.customer_id = c.id
+LEFT JOIN transaction_items ti ON ti.transaction_id = t.id
+LEFT JOIN products p ON p.id = ti.product_id
+GROUP BY c.id
+ORDER BY c.id DESC;
+
       `
     );
 
@@ -200,6 +202,7 @@ router.get("/", async (req, res) => {
     res.status(500).json({ message: "Failed to fetch customers", error: err.message });
   }
 });
+
 
 /* ------------------- ADMIN ADD / UPDATE CUSTOMER ------------------- */
 router.post("/admin-add", async (req, res) => {
@@ -273,5 +276,127 @@ router.post("/change-password", async (req, res) => {
     res.status(500).json({ message: "Password change failed", error: err.message });
   }
 });
+
+router.put("/:id/adjust-xerox", async (req, res) => {
+  try {
+    const customerId = req.params.id;
+    const { totalPrinted } = req.body;
+
+    if (totalPrinted < 0) {
+      return res.status(400).json({ message: "Invalid page count" });
+    }
+
+    // OFFER CONFIG
+    const BUY_QTY = 100;
+    const FREE_QTY = 20;
+
+    const cycles = Math.floor(totalPrinted / BUY_QTY);
+    const freeEarned = cycles * FREE_QTY;
+
+    // Get already used free pages
+    const [[existing]] = await query(
+      `SELECT pages_used FROM customer_rewards WHERE customer_id = ?`,
+      [customerId]
+    );
+
+    const pagesUsed = existing?.pages_used || 0;
+
+    // Prevent free used > free earned
+    const safePagesUsed = Math.min(pagesUsed, freeEarned);
+
+    // UPSERT
+    await query(
+      `
+      INSERT INTO customer_rewards
+        (customer_id, total_xerox_pages, free_xerox_pages, pages_used)
+      VALUES (?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        total_xerox_pages = VALUES(total_xerox_pages),
+        free_xerox_pages  = VALUES(free_xerox_pages),
+        pages_used        = VALUES(pages_used)
+      `,
+      [
+        customerId,
+        totalPrinted,
+        freeEarned,
+        safePagesUsed,
+      ]
+    );
+
+    res.json({
+      message: "Xerox pages recalculated",
+      totalPrinted,
+      freeEarned,
+      freeRemaining: freeEarned - safePagesUsed,
+    });
+  } catch (err) {
+    console.error("Adjust Xerox error:", err);
+    res.status(500).json({ message: "Adjustment failed", error: err.message });
+  }
+});
+
+router.delete("/:id", async (req, res) => {
+  try {
+    const customerId = req.params.id;
+
+    await query(
+      `UPDATE customers SET is_active = 0 WHERE id = ?`,
+      [customerId]
+    );
+
+    res.json({
+      message: "Customer deactivated successfully",
+    });
+  } catch (err) {
+    console.error("Soft delete error:", err);
+    res.status(500).json({
+      message: "Failed to deactivate customer",
+    });
+  }
+});
+
+router.put("/:id", async (req, res) => {
+  try {
+    const customerId = req.params.id;
+    const { name, mobile } = req.body;
+
+    if (!name || !mobile) {
+      return res.status(400).json({ message: "Name and mobile are required" });
+    }
+
+    await query(
+      `UPDATE customers
+       SET name = ?, mobile = ?
+       WHERE id = ?`,
+      [name, mobile, customerId]
+    );
+
+    res.json({ message: "Customer updated successfully" });
+  } catch (err) {
+    console.error("Customer update error:", err);
+    res.status(500).json({ message: "Update failed" });
+  }
+});
+router.put("/:id/activate", async (req, res) => {
+  try {
+    const customerId = req.params.id;
+
+    await query(
+      `UPDATE customers SET is_active = 1 WHERE id = ?`,
+      [customerId]
+    );
+
+    res.json({
+      message: "Customer activated successfully",
+    });
+  } catch (err) {
+    console.error("Activate customer error:", err);
+    res.status(500).json({
+      message: "Failed to activate customer",
+    });
+  }
+});
+
+
 
 export default router;

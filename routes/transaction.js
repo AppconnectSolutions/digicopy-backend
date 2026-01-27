@@ -354,4 +354,52 @@ router.get("/customer/:mobile", async (req, res) => {
   }
 });
 
+/* ------------------- GET SINGLE TRANSACTION (FOR VIEW / INVOICE) ------------------- */
+router.get("/:transactionId", async (req, res) => {
+  try {
+    const { transactionId } = req.params;
+
+    // Transaction header
+    const [rows] = await query(
+      `SELECT 
+         id AS transactionId,
+         total_amount AS totalAmount,
+         created_at AS date
+       FROM transactions
+       WHERE id = ?`,
+      [transactionId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ message: "Transaction not found" });
+    }
+
+    const transaction = rows[0];
+
+    // Transaction items
+    const [items] = await query(
+      `SELECT
+         ti.id,
+         p.name,
+         ti.quantity,
+         ti.paid_qty,
+         ti.free_qty,
+         ti.price,
+         (ti.paid_qty * ti.price) AS line_total
+       FROM transaction_items ti
+       JOIN products p ON p.id = ti.product_id
+       WHERE ti.transaction_id = ?`,
+      [transactionId]
+    );
+
+    transaction.items = items;
+
+    res.json({ transaction });
+  } catch (err) {
+    console.error("Fetch transaction error:", err);
+    res.status(500).json({ message: "Failed to fetch transaction" });
+  }
+});
+
+
 export default router;

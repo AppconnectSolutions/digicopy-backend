@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";
+import rolesRoutes from "./routes/roles.js";
 
 import customerRoutes from "./routes/customer.js";
 import adminRoutes from "./routes/admin.js";
@@ -61,6 +62,8 @@ app.use("/api/offers", offersRouter);
 app.use("/api/send-invoice", sendInvoiceRouter);
 app.use("/api/invoices", invoicesRouter);
 app.use("/api/promotions", promotionRoutes);
+
+app.use("/api/roles", rolesRoutes);
 
 const PORT = process.env.PORT || 5000;
 
