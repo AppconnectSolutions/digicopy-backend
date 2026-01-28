@@ -452,6 +452,64 @@ router.put("/:id/activate", async (req, res) => {
     });
   }
 });
+/* ------------------- RESET PASSWORD (NO OTP) ------------------- */
+router.post("/reset-password", async (req, res) => {
+  try {
+    const { mobile, newPassword } = req.body;
+
+    if (!mobile || !newPassword) {
+      return res.status(400).json({
+        message: "Mobile number and new password are required",
+      });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        message: "Password must be at least 6 characters",
+      });
+    }
+
+    // 🔎 Check customer exists
+    const [rows] = await query(
+      "SELECT id FROM customers WHERE mobile = ? AND is_active = 1",
+      [mobile]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({
+        message: "Customer not found with this mobile number",
+      });
+    }
+
+    const customerId = rows[0].id;
+
+    // 🔐 Hash new password
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    // ✅ Update password safely
+    await query(
+      `
+      UPDATE customers
+      SET
+        password_hash = ?,
+        password_set = 1,
+        force_password_change = 0
+      WHERE id = ?
+      `,
+      [hashedPassword, customerId]
+    );
+
+    res.json({
+      message: "Password updated successfully. Please login.",
+    });
+  } catch (err) {
+    console.error("Reset password error:", err);
+    res.status(500).json({
+      message: "Failed to reset password",
+      error: err.message,
+    });
+  }
+});
 
 
 
