@@ -14,7 +14,11 @@ const generateDefaultPassword = (mobile) => mobile.toString().slice(-4);
 /* ------------------- REGISTER ------------------- */
 router.post("/register", async (req, res) => {
   try {
-    const { name, email, mobile, password } = req.body;
+const { name, email, mobile, password, roleId } = req.body;
+
+const role_id =
+  roleId === undefined || roleId === null ? null : Number(roleId);
+
 
     if (!name || !email || !mobile || !password) {
       return res.status(400).json({ message: "Missing required fields" });
@@ -33,9 +37,9 @@ router.post("/register", async (req, res) => {
 
     const [result] = await query(
       `INSERT INTO customers
-       (name, email, mobile, password_hash, tier, points_balance, password_set, force_password_change)
-       VALUES (?, ?, ?, ?, 'Silver', 0, 1, 0)`,
-      [name, email, mobile, hashedPassword]
+       (name, email, mobile, password_hash, tier, points_balance, password_set, force_password_change, role_id)
+       VALUES (?, ?, ?, ?, 'Silver', 0, 1, 0,?)`,
+      [name, email, mobile, hashedPassword, role_id]
     );
 
     res.status(201).json({
@@ -173,26 +177,28 @@ router.get("/", async (req, res) => {
     const [rows] = await query(
       `
       SELECT
-  c.id,
-  c.name,
-  c.email,
-  c.mobile,
-  c.tier,
-  c.points_balance,
-  c.is_active,
-  IFNULL(SUM(
-    CASE
-      WHEN LOWER(TRIM(p.name)) LIKE '%xerox%' THEN ti.quantity
-      ELSE 0
-    END
-  ), 0) AS printCount
-FROM customers c
-LEFT JOIN transactions t ON t.customer_id = c.id
-LEFT JOIN transaction_items ti ON ti.transaction_id = t.id
-LEFT JOIN products p ON p.id = ti.product_id
-GROUP BY c.id
-ORDER BY c.id DESC;
-
+        c.id,
+        c.name,
+        c.email,
+        c.mobile,
+        c.tier,
+        c.points_balance,
+        c.is_active,
+        c.role_id,
+        r.role_name,
+        IFNULL(SUM(
+          CASE
+            WHEN LOWER(TRIM(p.name)) LIKE '%xerox%' THEN ti.quantity
+            ELSE 0
+          END
+        ), 0) AS printCount
+      FROM customers c
+      LEFT JOIN roles r ON r.id = c.role_id
+      LEFT JOIN transactions t ON t.customer_id = c.id
+      LEFT JOIN transaction_items ti ON ti.transaction_id = t.id
+      LEFT JOIN products p ON p.id = ti.product_id
+      GROUP BY c.id
+      ORDER BY c.id DESC;
       `
     );
 
@@ -204,16 +210,41 @@ ORDER BY c.id DESC;
 });
 
 
+
 /* ------------------- ADMIN ADD / UPDATE CUSTOMER ------------------- */
 router.post("/admin-add", async (req, res) => {
   try {
-    const { name, mobile } = req.body;
+    let { name, mobile, roleId } = req.body;
 
-    if (!mobile) {
-      return res.status(400).json({ message: "Mobile number is required" });
+const role_id =
+  roleId === undefined || roleId === null || roleId === ""
+    ? null
+    : Number(roleId);
+
+
+    mobile = String(mobile || "").replace(/\D/g, "");
+    name = String(name || "").trim();
+    
+
+    if (!mobile || mobile.length !== 10) {
+      return res.status(400).json({ message: "Valid 10-digit mobile number is required" });
     }
 
-    const [rows] = await query("SELECT id, name FROM customers WHERE mobile=?", [mobile]);
+    // ✅ Validate role_id if provided
+    if (role_id != null) {
+      const [r] = await query(
+        `SELECT id FROM roles WHERE id = ? AND is_active = 1`,
+        [role_id]
+      );
+      if (!r.length) {
+        return res.status(400).json({ message: "Invalid role selected" });
+      }
+    }
+
+    const [rows] = await query(
+      `SELECT id, name, mobile, role_id FROM customers WHERE mobile=?`,
+      [mobile]
+    );
 
     let customer;
     let action = "";
@@ -221,32 +252,62 @@ router.post("/admin-add", async (req, res) => {
     if (rows.length > 0) {
       customer = rows[0];
 
+      // update name only if empty (your existing logic)
       if (!customer.name || customer.name.trim() === "") {
-        await query("UPDATE customers SET name=? WHERE id=?", [name, customer.id]);
+        await query(`UPDATE customers SET name=?, role_id=? WHERE id=?`, [
+          name || null,
+          role_id,
+          customer.id,
+        ]);
         action = "updated";
-        customer.name = name;
       } else {
+        // ✅ still update role_id even if name exists
+        await query(`UPDATE customers SET role_id=? WHERE id=?`, [
+          role_id,
+          customer.id,
+        ]);
         action = "exists";
       }
-    } else {
-      const defaultPassword = mobile.slice(-4);
-      const hashedPassword = await bcrypt.hash(defaultPassword, 10);
 
-      const [result] = await query(
-        `INSERT INTO customers
-         (name, email, mobile, password_hash, tier, points_balance, password_set, force_password_change)
-         VALUES (?, NULL, ?, ?, 'Silver', 0, 1, 0)`,
-        [name, mobile, hashedPassword]
+      const [full] = await query(
+        `SELECT c.id, c.name, c.mobile, c.role_id, r.role_name
+         FROM customers c
+         LEFT JOIN roles r ON r.id = c.role_id
+         WHERE c.id = ?
+         LIMIT 1`,
+        [customer.id]
       );
 
-      customer = { id: result.insertId, name, mobile };
-      action = "created";
+      return res.json({
+        customer: full[0],
+        action,
+      });
     }
 
+    // CREATE customer
+    const defaultPassword = mobile.slice(-4);
+    const hashedPassword = await bcrypt.hash(defaultPassword, 10);
+
+    const [result] = await query(
+      `INSERT INTO customers
+       (name, email, mobile, password_hash, tier, points_balance, password_set, force_password_change, role_id)
+       VALUES (?, NULL, ?, ?, 'Silver', 0, 1, 0, ?)`,
+      [name || null, mobile, hashedPassword, role_id]
+    );
+
+    const [full] = await query(
+      `SELECT c.id, c.name, c.mobile, c.role_id, r.role_name
+       FROM customers c
+       LEFT JOIN roles r ON r.id = c.role_id
+       WHERE c.id = ?
+       LIMIT 1`,
+      [result.insertId]
+    );
+
     res.json({
-      customer,
-      action,
-      defaultPassword: action === "created" ? mobile.slice(-4) : undefined,
+      customer: full[0],
+      action: "created",
+      defaultPassword,
     });
   } catch (err) {
     console.error("Admin add/update error:", err);
@@ -278,62 +339,52 @@ router.post("/change-password", async (req, res) => {
 });
 
 router.put("/:id/adjust-xerox", async (req, res) => {
-  try {
-    const customerId = req.params.id;
-    const { totalPrinted } = req.body;
+  const customerId = req.params.id;
+  const { totalPrinted } = req.body;
 
-    if (totalPrinted < 0) {
-      return res.status(400).json({ message: "Invalid page count" });
-    }
+  const [[c]] = await query(
+    "SELECT role_id FROM customers WHERE id=?",
+    [customerId]
+  );
 
-    // OFFER CONFIG
-    const BUY_QTY = 100;
-    const FREE_QTY = 20;
-
-    const cycles = Math.floor(totalPrinted / BUY_QTY);
-    const freeEarned = cycles * FREE_QTY;
-
-    // Get already used free pages
-    const [[existing]] = await query(
-      `SELECT pages_used FROM customer_rewards WHERE customer_id = ?`,
-      [customerId]
-    );
-
-    const pagesUsed = existing?.pages_used || 0;
-
-    // Prevent free used > free earned
-    const safePagesUsed = Math.min(pagesUsed, freeEarned);
-
-    // UPSERT
-    await query(
-      `
-      INSERT INTO customer_rewards
-        (customer_id, total_xerox_pages, free_xerox_pages, pages_used)
-      VALUES (?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        total_xerox_pages = VALUES(total_xerox_pages),
-        free_xerox_pages  = VALUES(free_xerox_pages),
-        pages_used        = VALUES(pages_used)
-      `,
-      [
-        customerId,
-        totalPrinted,
-        freeEarned,
-        safePagesUsed,
-      ]
-    );
-
-    res.json({
-      message: "Xerox pages recalculated",
-      totalPrinted,
-      freeEarned,
-      freeRemaining: freeEarned - safePagesUsed,
-    });
-  } catch (err) {
-    console.error("Adjust Xerox error:", err);
-    res.status(500).json({ message: "Adjustment failed", error: err.message });
+  const offer = await getXeroxOfferForRole(c?.role_id);
+  if (!offer) {
+    return res.status(400).json({ message: "No Xerox offer configured" });
   }
+
+  const BUY_QTY = offer.buy_quantity;
+  const FREE_QTY = offer.free_quantity;
+
+  const cycles = Math.floor(totalPrinted / BUY_QTY);
+  const freeEarned = cycles * FREE_QTY;
+
+  const [[r]] = await query(
+    "SELECT pages_used FROM customer_rewards WHERE customer_id=?",
+    [customerId]
+  );
+
+  const pagesUsed = Math.min(r?.pages_used || 0, freeEarned);
+
+  await query(
+    `
+    INSERT INTO customer_rewards
+      (customer_id, total_xerox_pages, free_xerox_pages, pages_used)
+    VALUES (?,?,?,?)
+    ON DUPLICATE KEY UPDATE
+      total_xerox_pages=VALUES(total_xerox_pages),
+      free_xerox_pages=VALUES(free_xerox_pages),
+      pages_used=VALUES(pages_used)
+    `,
+    [customerId, totalPrinted, freeEarned, pagesUsed]
+  );
+
+  res.json({
+    message: "Xerox adjusted using role-based offer",
+    freeEarned,
+    freeRemaining: freeEarned - pagesUsed,
+  });
 });
+
 
 router.delete("/:id", async (req, res) => {
   try {
@@ -358,18 +409,23 @@ router.delete("/:id", async (req, res) => {
 router.put("/:id", async (req, res) => {
   try {
     const customerId = req.params.id;
-    const { name, mobile } = req.body;
+    const { name, mobile, roleId } = req.body;
+
+const role_id =
+  roleId === undefined || roleId === null ? null : Number(roleId);
+
 
     if (!name || !mobile) {
       return res.status(400).json({ message: "Name and mobile are required" });
     }
 
-    await query(
-      `UPDATE customers
-       SET name = ?, mobile = ?
-       WHERE id = ?`,
-      [name, mobile, customerId]
-    );
+   await query(
+  `UPDATE customers
+   SET name = ?, mobile = ?, role_id = ?
+   WHERE id = ?`,
+  [name, mobile, role_id ?? null, customerId]
+);
+
 
     res.json({ message: "Customer updated successfully" });
   } catch (err) {

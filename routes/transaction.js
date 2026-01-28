@@ -9,6 +9,7 @@ const router = express.Router();
  * - Free pages are consumed first ONLY if applyOffer = true
  * - Newly earned free pages can be consumed immediately if applyOffer = true
  */
+/* =================== LOYALTY SIMULATOR =================== */
 function simulateCycleLoyalty({
   qty,
   buyQty,
@@ -17,44 +18,39 @@ function simulateCycleLoyalty({
   progressPaid,
   freeBalance,
 }) {
-  let remainingNeed = Math.max(Math.floor(Number(qty) || 0), 0);
-
+  let remaining = Math.max(Math.floor(qty), 0);
   let paid = 0;
   let freeUsed = 0;
   let earned = 0;
 
-  let progress = Math.max(Math.floor(Number(progressPaid) || 0), 0); // 0..buyQty-1
-  let freeBal = Math.max(Math.floor(Number(freeBalance) || 0), 0);
+  let progress = Math.max(progressPaid, 0);
+  let freeBal = Math.max(freeBalance, 0);
 
-  // Use existing free first if applyOffer ON
-  if (applyOffer && freeBal > 0 && remainingNeed > 0) {
-    const use = Math.min(remainingNeed, freeBal);
+  if (applyOffer && freeBal > 0) {
+    const use = Math.min(remaining, freeBal);
     freeUsed += use;
     freeBal -= use;
-    remainingNeed -= use;
+    remaining -= use;
   }
 
-  // Pay remaining pages; complete cycles to earn free
-  while (remainingNeed > 0) {
-    const toCycleEnd = buyQty - progress; // how many paid pages to complete cycle
-    const payNow = Math.min(remainingNeed, toCycleEnd);
+  while (remaining > 0) {
+    const toCycleEnd = buyQty - progress;
+    const payNow = Math.min(remaining, toCycleEnd);
 
     paid += payNow;
     progress += payNow;
-    remainingNeed -= payNow;
+    remaining -= payNow;
 
-    // Cycle completed -> earn free pages
     if (progress === buyQty) {
       earned += freeQty;
       freeBal += freeQty;
       progress = 0;
 
-      // ✅ KEY: If applyOffer ON, use newly earned free immediately
-      if (applyOffer && freeBal > 0 && remainingNeed > 0) {
-        const use = Math.min(remainingNeed, freeBal);
+      if (applyOffer && freeBal > 0 && remaining > 0) {
+        const use = Math.min(remaining, freeBal);
         freeUsed += use;
         freeBal -= use;
-        remainingNeed -= use;
+        remaining -= use;
       }
     }
   }
@@ -62,150 +58,140 @@ function simulateCycleLoyalty({
   return { paid, freeUsed, earned, progress, freeBal };
 }
 
-/* ------------------- CREATE TRANSACTION ------------------- */
+/* =================== ROLE-BASED OFFER =================== */
+async function getXeroxOfferForRole(roleIdRaw) {
+  const roleId = roleIdRaw ?? 0;
+
+  const [[row]] = await query(
+    `
+    SELECT 
+      o.product_id,
+      o.buy_quantity,
+      o.free_quantity,
+      o.role_id
+    FROM offers o
+    JOIN products p ON p.id = o.product_id
+    WHERE o.active = 1
+      AND LOWER(TRIM(p.name)) LIKE '%xerox%'
+      AND COALESCE(o.role_id,0) IN (0, ?)
+    ORDER BY (COALESCE(o.role_id,0) = ?) DESC
+    LIMIT 1
+    `,
+    [roleId, roleId]
+  );
+
+  return row || null;
+}
+
+/* =================== CREATE TRANSACTION =================== */
 router.post("/create", async (req, res) => {
   const { customerMobile, items } = req.body;
-  const applyOffer = Boolean(req.body.applyOffer);
+  const applyOffer = req.body.applyOffer !== false;
 
-  if (!customerMobile || !items || !Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ message: "Missing required fields" });
-  }
-
-  for (const item of items) {
-    const productId = item.id;
-    const qty = Number(item.quantity);
-    const price = Number(item.price);
-    if (
-      !productId ||
-      !Number.isFinite(qty) ||
-      qty <= 0 ||
-      !Number.isFinite(price) ||
-      price < 0
-    ) {
-      return res.status(400).json({ message: "Invalid product data", item });
-    }
+  if (!customerMobile || !Array.isArray(items) || !items.length) {
+    return res.status(400).json({ message: "Invalid request" });
   }
 
   try {
-    // 1) customer
-    const [[customer]] = await query("SELECT id FROM customers WHERE mobile = ?", [
-      customerMobile,
-    ]);
-    if (!customer) return res.status(404).json({ message: "Customer not found" });
-    const customerId = customer.id;
-
-    // 2) active xerox offer + product id (latest active one)
-    const [[xeroxOffer]] = await query(
-      `SELECT p.id AS productId, p.name AS productName, o.buy_quantity, o.free_quantity
-       FROM offers o
-       JOIN products p ON p.id = o.product_id
-       WHERE o.active = 1 AND LOWER(TRIM(p.name)) LIKE '%xerox%'
-       ORDER BY o.id DESC
-       LIMIT 1`
+    /* ---- CUSTOMER ---- */
+    const [[customer]] = await query(
+      "SELECT id, role_id FROM customers WHERE mobile = ?",
+      [customerMobile]
     );
+    if (!customer) return res.status(404).json({ message: "Customer not found" });
 
-    const xeroxProductId = xeroxOffer?.productId || null;
-    const buyQty = Number(xeroxOffer?.buy_quantity || 0);
-    const freeQty = Number(xeroxOffer?.free_quantity || 0);
+    const offer = await getXeroxOfferForRole(customer.role_id);
+    const offerValid = offer && offer.buy_quantity > 0 && offer.free_quantity > 0;
 
-    const offerValid = xeroxProductId && buyQty > 0 && freeQty > 0;
-
-    // 3) rewards row
-    let [[reward]] = await query("SELECT * FROM customer_rewards WHERE customer_id = ?", [
-      customerId,
-    ]);
+    /* ---- REWARDS ---- */
+    let [[reward]] = await query(
+      "SELECT * FROM customer_rewards WHERE customer_id = ?",
+      [customer.id]
+    );
 
     if (!reward) {
       await query(
-        `INSERT INTO customer_rewards (customer_id, total_xerox_pages, free_xerox_pages, pages_used)
-         VALUES (?, 0, 0, 0)`,
-        [customerId]
+        `INSERT INTO customer_rewards
+         (customer_id, total_xerox_pages, free_xerox_pages, pages_used)
+         VALUES (?,0,0,0)`,
+        [customer.id]
       );
-      [[reward]] = await query("SELECT * FROM customer_rewards WHERE customer_id = ?", [
-        customerId,
-      ]);
+      [[reward]] = await query(
+        "SELECT * FROM customer_rewards WHERE customer_id = ?",
+        [customer.id]
+      );
     }
 
-    const totalPrintedBefore = Number(reward.total_xerox_pages || 0);
-    const freeEarnedBefore = Number(reward.free_xerox_pages || 0);
-    const freeUsedBefore = Number(reward.pages_used || 0);
+    const freeBalance =
+      Math.max(reward.free_xerox_pages - reward.pages_used, 0);
+    const paidTotal =
+      Math.max(reward.total_xerox_pages - reward.pages_used, 0);
 
-    const freeBalanceBefore = Math.max(freeEarnedBefore - freeUsedBefore, 0);
-    const paidTotalBefore = Math.max(totalPrintedBefore - freeUsedBefore, 0);
-    const progressPaidBefore = offerValid ? paidTotalBefore % buyQty : 0;
+    let progress =
+      offerValid ? paidTotal % offer.buy_quantity : 0;
+    let freeBal = freeBalance;
 
-    // running state for multiple xerox lines in same bill
-    let runningFreeBal = freeBalanceBefore;
-    let runningProgress = progressPaidBefore;
-
-    // 4) create transaction header
-    const [txRes] = await query(
-      "INSERT INTO transactions (customer_id, total_amount) VALUES (?, 0)",
-      [customerId]
+    /* ---- TRANSACTION HEADER ---- */
+    const [tx] = await query(
+      "INSERT INTO transactions (customer_id, total_amount) VALUES (?,0)",
+      [customer.id]
     );
-    const transactionId = txRes.insertId;
+    const txId = tx.insertId;
 
-    let transactionTotal = 0;
-
+    let totalAmount = 0;
     let xeroxRequested = 0;
-    let xeroxFreeUsedTx = 0;
-    let xeroxFreeEarnedTx = 0;
-    let xeroxPaidTx = 0;
+    let xeroxFreeUsed = 0;
+    let xeroxFreeEarned = 0;
 
-    // 5) insert line items
+    /* ---- ITEMS ---- */
     for (const item of items) {
-      const productId = item.id;
-      const name = (item.name || "").trim().toLowerCase();
-      const requestedQty = Math.floor(Number(item.quantity));
-      const unitPrice = Number(item.price);
+      const qty = Number(item.quantity);
+      const price = Number(item.price);
+      const isXerox =
+        offerValid && Number(item.id) === Number(offer.product_id);
 
-      const isXerox = offerValid ? productId === xeroxProductId : name.includes("xerox");
-
-      let paidQty = requestedQty;
+      let paidQty = qty;
       let freeQtyUsed = 0;
       let earnedFree = 0;
 
-      if (isXerox && offerValid) {
+      if (isXerox) {
         const sim = simulateCycleLoyalty({
-          qty: requestedQty,
-          buyQty,
-          freeQty,
+          qty,
+          buyQty: offer.buy_quantity,
+          freeQty: offer.free_quantity,
           applyOffer,
-          progressPaid: runningProgress,
-          freeBalance: runningFreeBal,
+          progressPaid: progress,
+          freeBalance: freeBal,
         });
 
         paidQty = sim.paid;
         freeQtyUsed = sim.freeUsed;
         earnedFree = sim.earned;
+        progress = sim.progress;
+        freeBal = sim.freeBal;
 
-        runningProgress = sim.progress;
-        runningFreeBal = sim.freeBal;
-
-        xeroxRequested += requestedQty;
-        xeroxFreeUsedTx += freeQtyUsed;
-        xeroxFreeEarnedTx += earnedFree;
-        xeroxPaidTx += paidQty;
+        xeroxRequested += qty;
+        xeroxFreeUsed += freeQtyUsed;
+        xeroxFreeEarned += earnedFree;
       }
 
-      const lineTotal = paidQty * unitPrice;
-      transactionTotal += lineTotal;
+      totalAmount += paidQty * price;
 
       await query(
         `INSERT INTO transaction_items
          (transaction_id, product_id, quantity, paid_qty, free_qty, price)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [transactionId, productId, requestedQty, paidQty, freeQtyUsed, unitPrice]
+         VALUES (?,?,?,?,?,?)`,
+        [txId, item.id, qty, paidQty, freeQtyUsed, price]
       );
     }
 
-    // 6) update transaction total
-    await query("UPDATE transactions SET total_amount = ? WHERE id = ?", [
-      transactionTotal,
-      transactionId,
-    ]);
+    /* ---- UPDATE TOTAL ---- */
+    await query(
+      "UPDATE transactions SET total_amount=? WHERE id=?",
+      [totalAmount, txId]
+    );
 
-    // 7) update rewards for xerox
+    /* ---- UPDATE REWARDS ---- */
     if (xeroxRequested > 0) {
       await query(
         `UPDATE customer_rewards
@@ -213,36 +199,21 @@ router.post("/create", async (req, res) => {
              free_xerox_pages  = free_xerox_pages + ?,
              pages_used        = pages_used + ?
          WHERE customer_id = ?`,
-        [xeroxRequested, xeroxFreeEarnedTx, xeroxFreeUsedTx, customerId]
+        [xeroxRequested, xeroxFreeEarned, xeroxFreeUsed, customer.id]
       );
     }
 
-    // ✅ return summary to show in invoice if you want
-    res.status(201).json({
-      message: "Transaction saved correctly",
-      transactionId,
-      totalAmount: transactionTotal,
+    res.json({
+      transactionId: txId,
+      totalAmount,
       offerApplied: applyOffer,
-      offer: offerValid
-        ? { productId: xeroxProductId, buyQty, freeQty }
-        : { productId: null, buyQty: 0, freeQty: 0 },
-      xeroxSummary: {
-        progress_before: progressPaidBefore,
-        wallet_before: freeBalanceBefore,
-        requested: xeroxRequested,
-        paid: xeroxPaidTx,
-        free_used: xeroxFreeUsedTx,
-        free_earned: xeroxFreeEarnedTx,
-        progress_after: runningProgress,
-        wallet_after: runningFreeBal,
-      },
+      offer,
     });
   } catch (err) {
-    console.error("Transaction error:", err);
-    res.status(500).json({ message: "Failed to save transaction" });
+    console.error(err);
+    res.status(500).json({ message: "Transaction failed" });
   }
 });
-
 /* ------------------- GET ITEMS BY TRANSACTION ------------------- */
 router.get("/items/:transactionId", async (req, res) => {
   const { transactionId } = req.params;
@@ -276,13 +247,32 @@ router.get("/customer/:mobile", async (req, res) => {
   const { mobile } = req.params;
 
   try {
-    const [customerRows] = await query("SELECT id, name, mobile FROM customers WHERE mobile = ?", [
-      mobile,
-    ]);
+    const [customerRows] = await query(
+  `
+  SELECT
+    c.id,
+    c.name,
+    c.mobile,
+    c.role_id,
+    r.role_name
+  FROM customers c
+  LEFT JOIN roles r ON r.id = c.role_id
+  WHERE c.mobile = ?
+  `,
+  [mobile]
+);
+
     if (!customerRows.length) {
       return res.status(404).json({ message: "Customer not found" });
     }
+
     const customerId = customerRows[0].id;
+    const roleId =
+  customerRows[0].role_id === null ||
+  customerRows[0].role_id === undefined
+    ? null
+    : Number(customerRows[0].role_id);
+
 
     const [transactions] = await query(
       `SELECT id AS transactionId, total_amount AS totalAmount, created_at AS date
@@ -292,22 +282,16 @@ router.get("/customer/:mobile", async (req, res) => {
       [customerId]
     );
 
-    const [[xeroxOffer]] = await query(
-      `SELECT p.id AS productId, o.buy_quantity, o.free_quantity
-       FROM offers o
-       JOIN products p ON p.id = o.product_id
-       WHERE o.active = 1 AND LOWER(TRIM(p.name)) LIKE '%xerox%'
-       ORDER BY o.id DESC
-       LIMIT 1`
-    );
+    const xeroxOffer = await getXeroxOfferForRole(roleId);
 
     const offerProductId = xeroxOffer?.productId || null;
     const buyQty = Number(xeroxOffer?.buy_quantity || 0);
     const freeQty = Number(xeroxOffer?.free_quantity || 0);
 
-    let [[reward]] = await query("SELECT * FROM customer_rewards WHERE customer_id = ?", [
-      customerId,
-    ]);
+    let [[reward]] = await query(
+      "SELECT * FROM customer_rewards WHERE customer_id = ?",
+      [customerId]
+    );
 
     if (!reward) {
       await query(
@@ -315,12 +299,13 @@ router.get("/customer/:mobile", async (req, res) => {
          VALUES (?, 0, 0, 0)`,
         [customerId]
       );
-      [[reward]] = await query("SELECT * FROM customer_rewards WHERE customer_id = ?", [
-        customerId,
-      ]);
+      [[reward]] = await query(
+        "SELECT * FROM customer_rewards WHERE customer_id = ?",
+        [customerId]
+      );
     }
 
-    const totalPrinted = Number(reward.total_xerox_pages || 0); // paid + free total
+    const totalPrinted = Number(reward.total_xerox_pages || 0);
     const freeEarned = Number(reward.free_xerox_pages || 0);
     const freeUsed = Number(reward.pages_used || 0);
 
@@ -331,70 +316,84 @@ router.get("/customer/:mobile", async (req, res) => {
     const cycle_count = buyQty > 0 ? Math.floor(paid_total / buyQty) : 0;
     const next_unlock_in = buyQty > 0 ? buyQty - cycle_progress : 0;
 
-    res.json({
-      customer: customerRows[0],
-      transactions,
-      rewards: {
-        xerox: {
-          offer_product_id: offerProductId,
-          totalPrinted,
-          paid_total,
-          free_remaining,
-          buy_quantity: buyQty,
-          free_quantity: freeQty,
-          cycle_progress,
-          cycle_count,
-          next_unlock_in,
-        },
-      },
-    });
+  const customer = {
+  id: customerRows[0].id,
+  name: customerRows[0].name,
+  mobile: customerRows[0].mobile,
+  role_id: roleId,
+  role_name: customerRows[0].role_name || "All",
+};
+
+res.json({
+  customer,
+  transactions,
+  rewards: {
+    xerox: {
+      offer_product_id: offerProductId,
+      totalPrinted,
+      paid_total,
+      free_remaining,
+      buy_quantity: buyQty,
+      free_quantity: freeQty,
+      cycle_progress,
+      cycle_count,
+      next_unlock_in,
+    },
+  },
+});
+
   } catch (err) {
     console.error("Fetch customer transactions error:", err);
     res.status(500).json({ message: "Failed to fetch transactions" });
   }
 });
 
-/* ------------------- GET SINGLE TRANSACTION (FOR VIEW / INVOICE) ------------------- */
+/* ------------------- GET FULL TRANSACTION (INVOICE) ------------------- */
 router.get("/:transactionId", async (req, res) => {
-  try {
-    const { transactionId } = req.params;
+  const { transactionId } = req.params;
 
-    // Transaction header
-    const [rows] = await query(
-      `SELECT 
-         id AS transactionId,
-         total_amount AS totalAmount,
-         created_at AS date
-       FROM transactions
-       WHERE id = ?`,
+  try {
+    const [[tx]] = await query(
+      `
+      SELECT
+        t.id AS transactionId,
+        t.total_amount AS totalAmount,
+        t.created_at AS date,
+        c.name AS customerName,
+        c.mobile
+      FROM transactions t
+      JOIN customers c ON c.id = t.customer_id
+      WHERE t.id = ?
+      `,
       [transactionId]
     );
 
-    if (!rows.length) {
+    if (!tx) {
       return res.status(404).json({ message: "Transaction not found" });
     }
 
-    const transaction = rows[0];
-
-    // Transaction items
     const [items] = await query(
-      `SELECT
-         ti.id,
-         p.name,
-         ti.quantity,
-         ti.paid_qty,
-         ti.free_qty,
-         ti.price,
-         (ti.paid_qty * ti.price) AS line_total
-       FROM transaction_items ti
-       JOIN products p ON p.id = ti.product_id
-       WHERE ti.transaction_id = ?`,
+      `
+      SELECT
+        ti.product_id,
+        p.name,
+        ti.quantity,
+        ti.paid_qty,
+        ti.free_qty,
+        ti.price
+      FROM transaction_items ti
+      JOIN products p ON p.id = ti.product_id
+      WHERE ti.transaction_id = ?
+      `,
       [transactionId]
     );
 
-    transaction.items = items;
-
-    res.json({ transaction });
+    res.json({
+      transaction: {
+        ...tx,
+        items,
+      },
+    });
   } catch (err) {
     console.error("Fetch transaction error:", err);
     res.status(500).json({ message: "Failed to fetch transaction" });

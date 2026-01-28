@@ -1,70 +1,96 @@
 import express from "express";
-import { pool } from "../db.js"; // ✅ promise-based pool
+import { pool } from "../db.js"; 
 
 const router = express.Router();
 
-/* ------------------- GET ALL OFFERS ------------------- */
-router.get("/", async (req, res) => {
-  try {
-    const [rows] = await pool.query(`
-      SELECT 
-        o.id, 
-        o.product_id, 
-        o.buy_quantity, 
-        o.free_quantity, 
-        o.active,
-        p.name AS productName
-      FROM offers o
-      LEFT JOIN products p ON p.id = o.product_id
-      ORDER BY o.id DESC
-    `);
+function toInt(v) {
+  return v === null || v === "" ? null : Number(v);
+}
+const toIntOrNull = (val) => {
+  if (val === undefined || val === null || val === "") return null;
+  const n = Number(val);
+  return Number.isNaN(n) ? null : n;
+};
+const validateRoleId = async (roleId) => {
+  if (roleId == null) return true; // NULL = common offer
 
-    const formattedRows = rows.map(offer => ({
-      ...offer,
-      productName: offer.productName || "Product not found"
-    }));
+  const [rows] = await pool.query(
+    `SELECT id FROM roles WHERE id = ? AND is_active = 1`,
+    [roleId]
+  );
 
-    res.json(formattedRows);
-  } catch (err) {
-    console.error("Fetch offers error:", err);
-    res.status(500).json({ message: "Failed to fetch offers", error: err.message });
-  }
+  return rows.length > 0;
+};
+
+/* =================== GET OFFERS =================== */
+router.get("/", async (_, res) => {
+  const [rows] = await pool.query(`
+    SELECT 
+      o.id, o.product_id, p.name productName,
+      o.role_id, r.role_name roleName,
+      o.buy_quantity, o.free_quantity, o.active
+    FROM offers o
+    LEFT JOIN products p ON p.id = o.product_id
+    LEFT JOIN roles r ON r.id = o.role_id
+    ORDER BY o.id DESC
+  `);
+
+  res.json(
+    rows.map((r) => ({
+      ...r,
+      roleName: r.roleName || "All",
+    }))
+  );
 });
 
-/* ------------------- CREATE OFFER ------------------- */
+/* =================== CREATE / UPSERT =================== */
 router.post("/", async (req, res) => {
-  const { productId, buyQuantity, freeQuantity } = req.body;
+  const { productId, buyQuantity, freeQuantity, roleId } = req.body;
 
-  if (!productId || !buyQuantity || !freeQuantity) {
-    return res.status(400).json({ message: "Missing required fields" });
-  }
+  await pool.query(
+    `
+    INSERT INTO offers (product_id, role_id, buy_quantity, free_quantity, active)
+    VALUES (?,?,?,?,1)
+    ON DUPLICATE KEY UPDATE
+      buy_quantity = VALUES(buy_quantity),
+      free_quantity = VALUES(free_quantity),
+      active = 1
+    `,
+    [productId, toInt(roleId), buyQuantity, freeQuantity]
+  );
 
-  try {
-    const [result] = await pool.query(
-      `INSERT INTO offers (product_id, buy_quantity, free_quantity) VALUES (?, ?, ?)`,
-      [productId, buyQuantity, freeQuantity]
-    );
-
-    res.status(201).json({ message: "Offer created", offerId: result.insertId });
-  } catch (err) {
-    console.error("Create offer error:", err);
-    res.status(500).json({ message: "Failed to create offer", error: err.message });
-  }
+  res.status(201).json({ message: "Offer saved" });
 });
-
-/* ------------------- UPDATE OFFER ------------------- */
+/* ------------------- UPDATE OFFER (ALLOW ROLE CHANGE) ------------------- */
 router.put("/:id", async (req, res) => {
-  const { id } = req.params;
-  const { productId, buyQuantity, freeQuantity } = req.body;
-
-  if (!productId || !buyQuantity || !freeQuantity) {
-    return res.status(400).json({ message: "Missing required fields" });
-  }
-
   try {
+    const id = toIntOrNull(req.params.id);
+    const productId = toIntOrNull(req.body.productId);
+    const buyQuantity = toIntOrNull(req.body.buyQuantity);
+    const freeQuantity = toIntOrNull(req.body.freeQuantity);
+    const roleId = toIntOrNull(req.body.roleId); // can be null
+
+    if (!id) return res.status(400).json({ message: "Invalid offer id" });
+
+    if (!productId || !buyQuantity || !freeQuantity) {
+      return res.status(400).json({ message: "Missing required fields" });
+    }
+    if (buyQuantity <= 0 || freeQuantity <= 0) {
+      return res.status(400).json({ message: "Quantities must be > 0" });
+    }
+
+    const okRole = await validateRoleId(roleId);
+    if (!okRole) {
+      return res.status(400).json({ message: "Invalid role selected" });
+    }
+
     const [result] = await pool.query(
-      `UPDATE offers SET product_id = ?, buy_quantity = ?, free_quantity = ? WHERE id = ?`,
-      [productId, buyQuantity, freeQuantity, id]
+      `
+      UPDATE offers
+      SET product_id = ?, role_id = ?, buy_quantity = ?, free_quantity = ?
+      WHERE id = ?
+      `,
+      [productId, roleId, buyQuantity, freeQuantity, id]
     );
 
     if (result.affectedRows === 0) {
@@ -73,6 +99,12 @@ router.put("/:id", async (req, res) => {
 
     res.json({ message: "Offer updated" });
   } catch (err) {
+    // if UNIQUE(product_id, role_id) violated during update
+    if (err && err.code === "ER_DUP_ENTRY") {
+      return res.status(400).json({
+        message: "Offer already exists for this product and role (duplicate)",
+      });
+    }
     console.error("Update offer error:", err);
     res.status(500).json({ message: "Failed to update offer", error: err.message });
   }
@@ -80,13 +112,11 @@ router.put("/:id", async (req, res) => {
 
 /* ------------------- DELETE OFFER ------------------- */
 router.delete("/:id", async (req, res) => {
-  const { id } = req.params;
-
   try {
-    const [result] = await pool.query(
-      `DELETE FROM offers WHERE id = ?`,
-      [id]
-    );
+    const id = toIntOrNull(req.params.id);
+    if (!id) return res.status(400).json({ message: "Invalid offer id" });
+
+    const [result] = await pool.query(`DELETE FROM offers WHERE id = ?`, [id]);
 
     if (result.affectedRows === 0) {
       return res.status(404).json({ message: "Offer not found" });
