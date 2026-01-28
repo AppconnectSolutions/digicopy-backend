@@ -65,10 +65,11 @@ router.post("/", async (req, res) => {
 router.put("/:id", async (req, res) => {
   try {
     const id = toIntOrNull(req.params.id);
-    const productId = toIntOrNull(req.body.productId);
-    const buyQuantity = toIntOrNull(req.body.buyQuantity);
-    const freeQuantity = toIntOrNull(req.body.freeQuantity);
-    const roleId = toIntOrNull(req.body.roleId); // can be null
+const productId = toIntOrNull(req.body.productId ?? req.body.product_id);
+const buyQuantity = toIntOrNull(req.body.buyQuantity ?? req.body.buy_quantity);
+const freeQuantity = toIntOrNull(req.body.freeQuantity ?? req.body.free_quantity);
+const roleId = toIntOrNull(req.body.roleId ?? req.body.role_id);
+
 
     if (!id) return res.status(400).json({ message: "Invalid offer id" });
 
