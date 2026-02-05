@@ -6,12 +6,17 @@ const router = express.Router();
 
 /* ================= HELPERS ================= */
 const roleLabelFromId = (role_id) => {
-  // keep your old logic for frontend compatibility
-  return Number(role_id) === 1 ? "ADMIN" : "STAFF";
+  switch (Number(role_id)) {
+    case 1:
+      return "ADMIN";
+    case 5:
+      return "SUPERADMIN";
+    default:
+      return "STAFF";
+  }
 };
 
 async function selectUsersSafe() {
-  // Try: admins + roles + name
   try {
     const [rows] = await query(
       `
@@ -29,7 +34,6 @@ async function selectUsersSafe() {
     );
     return rows;
   } catch (e1) {
-    // Fallback 1: roles table might not exist OR name column might not exist
     try {
       const [rows] = await query(
         `
@@ -54,7 +58,6 @@ async function selectUsersSafe() {
 async function insertAdminSafe({ name, email, password, role_id }) {
   const hash = await bcrypt.hash(password, 10);
 
-  // Try insert with name (if column exists)
   try {
     await query(
       `
@@ -65,7 +68,6 @@ async function insertAdminSafe({ name, email, password, role_id }) {
     );
     return true;
   } catch (e) {
-    // Fallback: if "name" column doesn't exist, insert without it
     await query(
       `
       INSERT INTO admins (email, password_hash, role_id, approved)
@@ -78,14 +80,16 @@ async function insertAdminSafe({ name, email, password, role_id }) {
 }
 
 /* ================= ADMIN LOGIN ================= */
+/* ================= ADMIN LOGIN ================= */
 router.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
 
     const [[admin]] = await query(
-      `SELECT id, email, password_hash, role_id, approved
-       FROM admins
-       WHERE email = ?`,
+      `SELECT a.id, a.email, a.password_hash, a.role_id, a.approved, r.role_name
+       FROM admins a
+       LEFT JOIN roles r ON r.id = a.role_id
+       WHERE a.email = ?`,
       [email]
     );
 
@@ -98,15 +102,19 @@ router.post("/login", async (req, res) => {
       return res.status(401).json({ message: "Invalid email or password" });
     }
 
-    // ✅ allow login always, just return approved status
+    // 🚫 Block login if not approved
+    if (Number(admin.approved) !== 1) {
+      return res.status(403).json({ message: "Access denied. User not approved." });
+    }
+
     res.json({
       message: "Login successful",
       admin: {
         id: admin.id,
         email: admin.email,
         role_id: admin.role_id,
-        role: admin.role_id === 1 ? "ADMIN" : "STAFF",
-        approved: Number(admin.approved) === 1 ? 1 : 0, // ✅ THIS IS THE KEY
+        role: admin.role_name || roleLabelFromId(admin.role_id),
+        approved: 1, // since we already checked it's approved
       },
     });
   } catch (err) {
@@ -114,7 +122,6 @@ router.post("/login", async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
-
 
 /* ================= CREATE ADMIN / STAFF ================= */
 router.post("/users", async (req, res) => {
@@ -125,7 +132,6 @@ router.post("/users", async (req, res) => {
       return res.status(400).json({ message: "Missing fields" });
     }
 
-    // check duplicate email
     const [[existing]] = await query(
       "SELECT id FROM admins WHERE email = ?",
       [email]
@@ -160,7 +166,7 @@ router.get("/users", async (req, res) => {
       email: u.email,
       role_id: u.role_id,
       role_name: u.role_name ?? null,
-      role: roleLabelFromId(u.role_id),
+      role: u.role_name || roleLabelFromId(u.role_id),
       is_active: Number(u.approved) === 1 ? 1 : 0,
       approved: Number(u.approved) === 1 ? 1 : 0,
     }));
