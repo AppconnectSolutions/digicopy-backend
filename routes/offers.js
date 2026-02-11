@@ -73,7 +73,6 @@ router.post("/", async (req, res) => {
 });
 
 /* ------------------- UPDATE OFFER (ALLOW ROLE CHANGE) ------------------- */
-/* ------------------- UPDATE OFFER (ALLOW ROLE CHANGE) ------------------- */
 router.put("/:id", async (req, res) => {
   try {
     const id = toIntOrNull(req.params.id);
@@ -90,8 +89,9 @@ router.put("/:id", async (req, res) => {
       return res.status(400).json({ message: "Missing or invalid numeric fields" });
     }
 
-    if (buyQuantity <= 0 || freeQuantity <= 0) {
-      return res.status(400).json({ message: "Quantities must be > 0" });
+    // Allow 0, but disallow negatives
+    if (buyQuantity < 0 || freeQuantity < 0) {
+      return res.status(400).json({ message: "Quantities must be >= 0" });
     }
 
     const okRole = await validateRoleId(roleId);
@@ -114,7 +114,6 @@ router.put("/:id", async (req, res) => {
 
     res.json({ message: "Offer updated" });
   } catch (err) {
-    // Handle duplicate constraint violation
     if (err && err.code === "ER_DUP_ENTRY") {
       return res.status(400).json({
         message: "Offer already exists for this product and role (duplicate)",
