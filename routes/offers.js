@@ -73,20 +73,22 @@ router.post("/", async (req, res) => {
 });
 
 /* ------------------- UPDATE OFFER (ALLOW ROLE CHANGE) ------------------- */
+/* ------------------- UPDATE OFFER (ALLOW ROLE CHANGE) ------------------- */
 router.put("/:id", async (req, res) => {
   try {
     const id = toIntOrNull(req.params.id);
-const productId = toIntOrNull(req.body.productId);
-const buyQuantity = toIntOrNull(req.body.buyQuantity);
-const freeQuantity = toIntOrNull(req.body.freeQuantity);
-const roleId = toIntOrNull(req.body.roleId);
+    const productId = toIntOrNull(req.body.product_id);
+    const buyQuantity = toIntOrNull(req.body.buy_quantity);
+    const freeQuantity = toIntOrNull(req.body.free_quantity);
+    const roleId = toIntOrNull(req.body.role_id);
 
-
-    if (!id) return res.status(400).json({ message: "Invalid offer id" });
+    if (!id) {
+      return res.status(400).json({ message: "Invalid offer id" });
+    }
 
     if (productId == null || buyQuantity == null || freeQuantity == null) {
-  return res.status(400).json({ message: "Missing or invalid numeric fields" });
-}
+      return res.status(400).json({ message: "Missing or invalid numeric fields" });
+    }
 
     if (buyQuantity <= 0 || freeQuantity <= 0) {
       return res.status(400).json({ message: "Quantities must be > 0" });
@@ -112,7 +114,7 @@ const roleId = toIntOrNull(req.body.roleId);
 
     res.json({ message: "Offer updated" });
   } catch (err) {
-    // if UNIQUE(product_id, role_id) violated during update
+    // Handle duplicate constraint violation
     if (err && err.code === "ER_DUP_ENTRY") {
       return res.status(400).json({
         message: "Offer already exists for this product and role (duplicate)",
@@ -122,6 +124,7 @@ const roleId = toIntOrNull(req.body.roleId);
     res.status(500).json({ message: "Failed to update offer", error: err.message });
   }
 });
+
 
 /* ------------------- DELETE OFFER ------------------- */
 router.delete("/:id", async (req, res) => {
